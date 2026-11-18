@@ -1,3 +1,11 @@
+
+
+https://github.com/user-attachments/assets/326d974b-d29e-4d53-8ef3-a1d1dcc748d4
+
+
+
+https://github.com/user-attachments/assets/6d0d01ec-a4eb-41b9-824b-1cccda42305f
+
 # Sellbird Local AI Sales Agent
 
 This checkout extends the Harvey/Sellbird application with a product-scoped sales workspace that runs inference through a local Ollama server. The new experience is available at **`/sales-agent`** in the existing FastAPI dashboard. Its AI workflows have no cloud model fallback.
