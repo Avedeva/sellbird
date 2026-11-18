@@ -158,42 +158,33 @@ async def test_given_up_prospects_can_be_retried(state, capsys):
     assert await state.retry_write_failed() == 0
 
 
-class _ClaudeProcess:
-    """A Claude CLI that exits 0 with the given JSON result payload."""
-
-    returncode = 0
-
-    def __init__(self, payload):
-        self.payload = payload
-
-    async def communicate(self, data=None):
-        import json
-        return json.dumps(self.payload).encode(), b""
-
-
 @pytest.mark.asyncio
-async def test_a_cli_reported_api_error_is_no_reply_not_model_text(state, monkeypatch):
-    # The CLI can report an API error (overloaded, rate limited) inside a
-    # successful exit. That text is not the model's answer: no caller should
-    # treat it as a draft, and the Writer must not count it as a bad one.
-    import sellbird.brain as brain_mod
+async def test_local_service_error_is_no_reply_and_valid_json_is_extracted(state):
+    # A transient local server error is retried once. A persistent outage is
+    # not a bad draft, and a later valid reply uses normal JSON extraction.
+    import httpx
     from sellbird.brain import Brain
+    from sellbird.local_ai import OllamaService
 
-    payloads = []
+    responses = [
+        httpx.Response(503, json={"error": "temporarily unavailable"}),
+        httpx.Response(503, json={"error": "temporarily unavailable"}),
+        httpx.Response(200, json={"message": {"content": '{"ok": true}'}}),
+    ]
+    chat_attempts = []
 
-    async def fake_exec(*cmd, **kwargs):
-        return _ClaudeProcess(payloads.pop(0))
+    def handler(request):
+        if request.url.path == "/api/tags":
+            return httpx.Response(200, json={"models": [{"name": "qwen3:4b"}]})
+        chat_attempts.append(request)
+        return responses.pop(0)
 
-    async def no_sleep(*a, **kw):
-        return None
-
-    monkeypatch.setattr(brain_mod.asyncio, "create_subprocess_exec", fake_exec)
-    monkeypatch.setattr(brain_mod.asyncio, "sleep", no_sleep)
     brain = Brain(state)
+    await brain.store.ensure()
+    brain.ai = OllamaService(brain.store, transport_factory=lambda: httpx.MockTransport(handler))
 
-    payloads[:] = [{"type": "result", "is_error": True, "result": "API Error: 529 Overloaded"}] * 5
-    assert await brain.think("hi", max_retries=1) == ""
     assert await brain.think_json("hi") is None and brain.last_reply_empty is True
-
-    payloads[:] = [{"type": "result", "is_error": False, "result": '{"ok": true}'}]
+    assert len(chat_attempts) == 2
+    assert await brain.preflight() == ""
     assert await brain.think_json("hi") == {"ok": True} and brain.last_reply_empty is False
+    assert len(chat_attempts) == 3

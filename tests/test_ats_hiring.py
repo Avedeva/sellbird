@@ -397,12 +397,12 @@ def test_the_hiring_preset_searches_company_careers_pages_for_each_role():
         assert all(f"-site:{site}" in t for t in terms)
 
 
-def test_the_hiring_preset_falls_back_to_titles_and_needs_search():
+def test_the_hiring_preset_falls_back_to_titles_but_paid_search_is_disabled():
     terms = [q.term for q in build_queries(_config(hiring=()), preset="hiring")]
     assert len(terms) == 1 and '"ceo"' in terms[0]
     assert preset_problem("hiring", "osm")
-    assert preset_problem("hiring", "serper") is None
-    assert preset_problem("hiring", "tinyfish") is None
+    assert preset_problem("hiring", "serper")
+    assert preset_problem("hiring", "tinyfish")
     assert "hiring" in PRESETS
 
 
@@ -580,12 +580,17 @@ def test_role_equivalences_and_assistants(keyword, title, hit):
     assert bool(matching_roles([parse_feed("lever", [{"text": title}])[0]], [keyword])) is hit
 
 
-def test_the_hiring_preset_needs_roles():
+def test_the_hiring_preset_needs_roles(monkeypatch):
+    from sellbird.collectors import discover as D
+    # Exercise preset validation with an explicitly injected search provider.
+    # The shipped registry intentionally exposes only OSM, so paid search
+    # providers must not be used as stand-ins in this unit test.
+    monkeypatch.setitem(D.PROVIDERS, "fake", _OneHit("careers.acme.com"))
     empty = _config(titles=(), hiring=())
-    problem = preset_problem("hiring", "serper", config=empty)
+    problem = preset_problem("hiring", "fake", config=empty)
     assert problem and "hiring_signals" in problem
-    assert preset_problem("hiring", "serper", config=_config()) is None
-    assert preset_problem("yc", "serper", config=empty) is None
+    assert preset_problem("hiring", "fake", config=_config()) is None
+    assert preset_problem("yc", "fake", config=empty) is None
 
 
 @pytest.mark.parametrize("domain", [

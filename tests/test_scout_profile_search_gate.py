@@ -25,23 +25,22 @@ def _scout(linkedin_enabled: bool, linkedin_email: str = "") -> Scout:
 
 
 @pytest.mark.asyncio
-async def test_profile_search_rides_the_linkedin_switch():
-    """site:linkedin.com/in searches yield names with no company or email,
-    which Sellbird can never verify or send to, so they are off by default."""
-    scout = _scout(linkedin_enabled=False)
-    await scout.run()
-    scout._prospect_via_profile_search.assert_not_awaited()
-    scout._prospect_via_company_discovery.assert_awaited_once()
-
-    scout = _scout(linkedin_enabled=True, linkedin_email="me@example.com")
-    await scout.run()
-    scout._prospect_via_profile_search.assert_awaited_once()
+async def test_paid_and_linkedin_strategies_are_not_active_even_when_configured():
+    """The local-only Scout uses account backfill, public boards and public search."""
+    for enabled, email in ((False, ""), (True, "me@example.com")):
+        scout = _scout(linkedin_enabled=enabled, linkedin_email=email)
+        await scout.run()
+        scout._prospect_via_known_companies.assert_awaited_once()
+        scout._prospect_via_hiring_boards.assert_awaited_once()
+        scout._prospect_via_company_discovery.assert_awaited_once()
+        scout._prospect_via_hunter.assert_not_awaited()
+        scout._prospect_via_linkedin.assert_not_awaited()
+        scout._prospect_via_profile_search.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_profile_search_needs_a_linkedin_login_like_the_linkedin_strategy():
-    """Switched on but with no LinkedIn account, nothing could use the
-    profiles, so the search would only spend the cycle's query budget."""
+async def test_linkedin_login_does_not_enable_profile_search():
+    """LinkedIn profile searches remain out of the public-source workflow."""
     scout = _scout(linkedin_enabled=True)
     await scout.run()
     scout._prospect_via_profile_search.assert_not_awaited()

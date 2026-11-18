@@ -172,17 +172,17 @@ async def test_task_errors_raise_but_no_results_is_empty():
 def test_estimates_use_live_pricing():
     q30 = [D.DiscoveryQuery(term="roofer", location="Denver", depth=30)]
     # Live organic: $0.002 per page of 10 → depth 30 is three pages.
-    assert D.estimate_cost("dataforseo_serp", q30) == pytest.approx(0.006)
+    assert D.DataForSEOSerp().estimate(q30) == pytest.approx(0.006)
     # Live Maps: $0.002 per SERP of up to 100 results.
-    assert D.estimate_cost("dataforseo_maps", q30) == pytest.approx(0.002)
+    assert D.DataForSEOMaps().estimate(q30) == pytest.approx(0.002)
     q150 = [D.DiscoveryQuery(term="roofer", location="Denver", depth=150)]
-    assert D.estimate_cost("dataforseo_maps", q150) == pytest.approx(0.004)
+    assert D.DataForSEOMaps().estimate(q150) == pytest.approx(0.004)
 
 
 def test_rank_cost_notes_match_live_pricing():
     serp = next(s for s in SIGNAL_CATALOG if s["code"] == "SERP_RANK")
     assert "0.006" in serp["cost_note"] and "0.0006" not in serp["cost_note"]
-    assert "0.006" in D.PROVIDERS["dataforseo_serp"].cost_note
+    assert "0.006" in D.DataForSEOSerp().cost_note
     maps = next(s for s in SIGNAL_CATALOG if s["code"] == "MAPS_RANK")
     assert not maps["cost_note"].lower().startswith(("free", "included"))
 
@@ -219,7 +219,7 @@ async def test_local_pack_is_parsed_and_ads_are_dropped():
 
 @pytest.mark.asyncio
 async def test_maps_adapter():
-    provider = D.PROVIDERS["dataforseo_maps"]
+    provider = D.DataForSEOMaps()
     seen, out = await _capture(provider, D.DiscoveryQuery(
         term="roofer", location="Denver, CO", coordinate="39.7392,-104.9903,40"),
         payload=MAPS)
@@ -246,7 +246,7 @@ async def test_maps_adapter():
 
 @pytest.mark.asyncio
 async def test_maps_without_coordinates_uses_location_name():
-    seen, _ = await _capture(D.PROVIDERS["dataforseo_maps"], D.DiscoveryQuery(
+    seen, _ = await _capture(D.DataForSEOMaps(), D.DiscoveryQuery(
         term="roofer", location="Denver, CO"), payload=MAPS)
     assert seen["body"]["location_name"] == "Denver,Colorado,United States"
 
@@ -260,7 +260,10 @@ async def test_rank_providers_are_geocoded_before_the_run(state, monkeypatch):
         return "39.7392,-104.9903,40"
 
     monkeypatch.setattr(D, "geocode_city", geocode)
-    for key in ("dataforseo_serp", "dataforseo_maps"):
+    adapters = {"dataforseo_serp": D.DataForSEOSerp(),
+                "dataforseo_maps": D.DataForSEOMaps()}
+    for key, adapter in adapters.items():
+        monkeypatch.setitem(D.PROVIDERS, key, adapter)
         q = [D.DiscoveryQuery(term="roofer", location="Denver, CO")]
         await D.run_discovery(state, load_config(), key, q, dry_run=True)
         assert q[0].coordinate == "39.7392,-104.9903,40"
@@ -296,6 +299,10 @@ def test_without_variants_each_industry_is_its_own_search():
 
 def _install(monkeypatch, handler):
     real = REAL_CLIENT
+    # These tests exercise the retired adapter classes in isolation; inject
+    # them only for the test that invokes run_discovery.
+    monkeypatch.setitem(D.PROVIDERS, "dataforseo_serp", D.DataForSEOSerp())
+    monkeypatch.setitem(D.PROVIDERS, "dataforseo_maps", D.DataForSEOMaps())
     monkeypatch.setattr(D.httpx, "AsyncClient", lambda **kw: real(
         transport=httpx.MockTransport(handler), **kw))
     monkeypatch.setattr("sellbird.config.load_env", lambda: EnvConfig(

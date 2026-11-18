@@ -119,95 +119,39 @@ async def test_a_cached_default_does_not_block_a_known_address():
 
 
 @pytest.mark.asyncio
-async def test_a_cached_default_does_not_block_hunter(monkeypatch):
-    calls = []
+async def test_a_cached_default_falls_back_without_paid_lookup(monkeypatch):
+    async def forbidden(*args, **kwargs):
+        raise AssertionError("paid email enrichment must not run")
 
-    async def hunter(domain, key):
-        calls.append(domain)
-        return "{fi}{l}", 0.8
-
-    monkeypatch.setattr(ef, "_hunter_domain_pattern", hunter)
-    monkeypatch.setattr(ef, "_hunter_api_key", lambda: "k")
+    monkeypatch.setattr(ef, "_hunter_domain_pattern", forbidden)
     st = PatternState({"pattern": "{f}.{l}", "source": "default", "confidence": 0.3})
-    assert (await ef.derive_pattern("acme.com", state=st))[0] == "{fi}{l}"
-    assert calls == ["acme.com"]
+    assert await ef.derive_pattern("acme.com", state=st) == ("{f}.{l}", "default", 0.3)
 
 
 @pytest.mark.asyncio
-async def test_hunter_is_not_asked_twice_about_a_domain_it_had_no_pattern_for(monkeypatch):
-    calls = []
+async def test_default_pattern_does_not_query_a_paid_provider(monkeypatch):
+    async def forbidden(*args, **kwargs):
+        raise AssertionError("paid email enrichment must not run")
 
-    async def hunter(domain, key):
-        calls.append(domain)
-        return None
-
-    monkeypatch.setattr(ef, "_hunter_domain_pattern", hunter)
-    monkeypatch.setattr(ef, "_hunter_api_key", lambda: "k")
-    first = await ef.derive_pattern("acme.com", state=PatternState())
-    assert first[1] == "default_after_hunter" and calls == ["acme.com"]
-    st = PatternState({"pattern": first[0], "source": first[1], "confidence": first[2]})
-    await ef.derive_pattern("acme.com", state=st)
-    assert calls == ["acme.com"]
+    monkeypatch.setattr(ef, "_hunter_domain_pattern", forbidden)
+    for _ in range(2):
+        pattern, source, confidence = await ef.derive_pattern("acme.com", state=PatternState())
+        assert pattern == ef.DEFAULT_PATTERN and source == "default" and confidence < 0.5
 
 
 @pytest.mark.asyncio
-async def test_a_low_confidence_site_guess_still_gets_one_hunter_lookup(monkeypatch):
-    calls = []
+async def test_low_confidence_site_guess_is_used_without_paid_lookup(monkeypatch):
+    async def forbidden(*args, **kwargs):
+        raise AssertionError("paid email enrichment must not run")
 
-    async def hunter(domain, key):
-        calls.append(domain)
-        return None
-
-    monkeypatch.setattr(ef, "_hunter_domain_pattern", hunter)
-    monkeypatch.setattr(ef, "_hunter_api_key", lambda: "k")
+    monkeypatch.setattr(ef, "_hunter_domain_pattern", forbidden)
     cached = {"pattern": "{fi}{l}", "source": "site_address_guess", "confidence": 0.6}
     pattern, source, conf = await ef.derive_pattern("acme.com", state=PatternState(cached))
-    assert calls == ["acme.com"] and pattern == "{fi}{l}" and source.endswith("_after_hunter")
-    await ef.derive_pattern("acme.com", state=PatternState(
-        {"pattern": pattern, "source": source, "confidence": conf}))
-    assert calls == ["acme.com"]
-
-
-@pytest.mark.asyncio
-async def test_a_hunter_outage_is_not_remembered_as_no_pattern(monkeypatch):
-    async def down(domain, key):
-        raise ef.HunterUnavailable("429")
-
-    monkeypatch.setattr(ef, "_hunter_domain_pattern", down)
-    monkeypatch.setattr(ef, "_hunter_api_key", lambda: "k")
-    _, source, _ = await ef.derive_pattern("acme.com", state=PatternState())
-    assert source == "default"      # asked again next time
-
-
-@pytest.mark.parametrize("status", [429, 500, 503])
-@pytest.mark.asyncio
-async def test_hunter_errors_are_transient(monkeypatch, status):
-    class Resp:
-        status_code = status
-
-    class Client:
-        def __init__(self, **kw):
-            pass
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *a):
-            return False
-
-        async def get(self, url, params=None, headers=None):
-            assert "api_key" not in (params or {})      # the key travels in a header
-            assert (headers or {}).get("X-API-KEY") == "k"
-            return Resp()
-
-    monkeypatch.setattr(ef.httpx, "AsyncClient", Client)
-    with pytest.raises(ef.HunterUnavailable):
-        await ef._hunter_domain_pattern("acme.com", "k")
+    assert pattern == "{fi}{l}" and source == "site_address_guess" and conf == 0.6
 
 
 @pytest.mark.asyncio
 async def test_a_small_business_with_no_evidence_defaults_to_first_name(monkeypatch):
-    monkeypatch.setattr(ef, "_hunter_api_key", lambda: "")
     pattern, source, conf = await ef.derive_pattern(
         "acme.com", state=PatternState(), default_pattern=ef.SMALL_BUSINESS_PATTERN)
     assert (pattern, source) == ("{f}", "default") and conf < 0.5

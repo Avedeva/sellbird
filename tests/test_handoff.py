@@ -3,6 +3,7 @@ tool once, and the reply it drafts carries what that system answered."""
 
 import sys
 import textwrap
+import os
 from types import SimpleNamespace
 
 import pytest
@@ -32,7 +33,14 @@ SERVER = textwrap.dedent('''
 
 
 @pytest.fixture
-def stdio_handoff(tmp_path):
+def stdio_handoff(tmp_path, monkeypatch):
+    # The MCP stdio launcher deliberately inherits only a safe allowlist. In
+    # this checkout the SDK is exposed to pytest through a temporary
+    # PYTHONPATH, so explicitly preserve that test dependency for the child.
+    from mcp.client import stdio
+    original_environment = stdio.get_default_environment
+    monkeypatch.setattr(stdio, "get_default_environment", lambda: {
+        **original_environment(), "PYTHONPATH": os.environ.get("PYTHONPATH", "")})
     script = tmp_path / "server.py"
     script.write_text(SERVER)
     return HandoffConfig(mcp_command=[sys.executable, str(script)], tool="create_site",

@@ -82,9 +82,12 @@ def no_network(monkeypatch):
 
     monkeypatch.setattr(ef, "get_mx_host", mx)
     monkeypatch.setattr(ef, "_hunter_api_key", lambda: "")
-    for name in ("verify_reoon", "verify_zerobounce", "verify_hunter", "verify_email_smtp",
+    for name in ("verify_reoon", "verify_zerobounce", "verify_hunter",
                  "_hunter_domain_pattern"):
         monkeypatch.setattr(ef, name, boom)
+    async def smtp_inconclusive(email):
+        return None
+    monkeypatch.setattr(ef, "verify_email_smtp", smtp_inconclusive)
 
     async def unverified(email, env=None):
         return "guess"
@@ -413,17 +416,21 @@ async def test_scout_search_tinyfish():
 
 
 @pytest.mark.asyncio
-async def test_scout_search_web_uses_tinyfish_backend():
+async def test_scout_web_search_ignores_paid_key_and_uses_public_backend():
     scout = site_scout({})
     scout.env.tinyfish_api_key = "tf_key"
     called = []
 
-    async def fake_tinyfish(query, key):
-        called.append(("tinyfish", query, key))
+    async def forbidden_tinyfish(query, key):
+        raise AssertionError("paid search providers are disabled")
+
+    async def fake_duckduckgo(query):
+        called.append(("duckduckgo", query))
         return [("https://summit.example", "Roofing in Denver")]
 
-    scout._search_tinyfish = fake_tinyfish
+    scout._search_tinyfish = forbidden_tinyfish
+    scout._search_duckduckgo = fake_duckduckgo
     results = await scout._web_search("Denver roofers")
-    assert called == [("tinyfish", "Denver roofers", "tf_key")]
+    assert called == [("duckduckgo", "Denver roofers")]
     assert len(results) == 1
     assert results[0][0] == "https://summit.example"

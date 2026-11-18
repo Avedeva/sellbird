@@ -1,16 +1,13 @@
 """Tests for usage tracking: schema, pricing, result parsing, reconciliation, quota."""
 
-import json
 import os
 import tempfile
-from pathlib import Path
 
 import pytest
 import pytest_asyncio
 
 from sellbird.brain import Brain
 from sellbird.state import StateManager
-from sellbird.integrations.quota import _parse_window, _token_from_json_blob
 
 
 @pytest_asyncio.fixture
@@ -82,59 +79,24 @@ async def test_request_key_dedup(state):
     assert totals["today"]["output_tokens"] == 50
 
 
-# ── Brain result-JSON parsing ──
+# ── Local Brain JSON handling and usage model ──
 
 
-SAMPLE_RESULT = {
-    "type": "result",
-    "subtype": "success",
-    "is_error": False,
-    "duration_ms": 1428,
-    "num_turns": 1,
-    "result": "Hello from Claude",
-    "session_id": "f362e409-925c-4eb1-ba98-60484bb2dcf5",
-    "total_cost_usd": 0.0182948,
-    "usage": {"input_tokens": 10, "output_tokens": 51},
-    "modelUsage": {
-        "claude-haiku-4-5-20251001": {
-            "inputTokens": 10, "outputTokens": 51,
-            "cacheReadInputTokens": 17198, "cacheCreationInputTokens": 8155,
-            "costUSD": 0.0182948,
-        }
-    },
-}
-
-
-def test_parse_result_payload_json():
-    text, payload = Brain._parse_result_payload(json.dumps(SAMPLE_RESULT))
-    assert text == "Hello from Claude"
-    assert payload["session_id"] == "f362e409-925c-4eb1-ba98-60484bb2dcf5"
-
-
-def test_parse_result_payload_plain_text_fallback():
-    text, payload = Brain._parse_result_payload("just plain text output")
-    assert text == "just plain text output"
-    assert payload is None
-    # A JSON response body that isn't a CLI result envelope stays verbatim
-    text2, payload2 = Brain._parse_result_payload('{"intent": "interested"}')
-    assert text2 == '{"intent": "interested"}'
-    assert payload2 is None
+@pytest.mark.parametrize("raw, expected", [
+    ('{"intent":"interested"}', {"intent": "interested"}),
+    ('```json\n{"intent":"unsubscribe"}\n```', {"intent": "unsubscribe"}),
+    ("plain text", None),
+])
+def test_brain_extracts_json_without_provider_envelopes(raw, expected):
+    assert Brain._extract_json(raw) == expected
 
 
 @pytest.mark.asyncio
-async def test_brain_records_usage_from_payload(state):
+async def test_brain_usage_is_local_and_unmetered(state):
     brain = Brain(state)
-    await brain._record_usage(
-        SAMPLE_RESULT, agent="", task="", label="sellbird-scout-score"
-    )
-    rows = await state.usage_by_agent(days=1)
-    assert len(rows) == 1
-    assert rows[0]["agent"] == "scout"  # derived from the sellbird-* label
-    assert rows[0]["output_tokens"] == 51
-    assert rows[0]["cost_usd"] == pytest.approx(0.0182948, abs=1e-4)
-
-    by_model = await state.usage_by_model(days=1)
-    assert by_model[0]["model"] == "claude-haiku-4-5-20251001"
+    assert brain.provider == "ollama"
+    assert await brain.check_usage() == 0.0
+    assert await brain.is_within_budget()
 
 
 @pytest.mark.asyncio
@@ -144,21 +106,3 @@ async def test_usage_is_sellbird_only(state):
     import sellbird.usage as usage_mod
     assert not hasattr(usage_mod, "reconcile_transcripts")
     assert not hasattr(usage_mod, "parse_transcript_events")
-
-
-# ── quota client helpers ──
-
-
-def test_token_from_json_blob():
-    blob = json.dumps({"claudeAiOauth": {"accessToken": "sk-ant-oat01-abc"}})
-    assert _token_from_json_blob(blob) == "sk-ant-oat01-abc"
-    assert _token_from_json_blob("not json") is None
-    assert _token_from_json_blob(json.dumps({"other": 1})) is None
-
-
-def test_parse_window():
-    parsed = _parse_window({"utilization": 42.5, "resets_at": "2026-08-29T01:00:00Z"})
-    assert parsed == {"utilization": 42.5, "resets_at": "2026-08-29T01:00:00Z"}
-    assert _parse_window({"utilization": "bad"}) is None
-    assert _parse_window(None) is None
-    assert _parse_window({"utilization": 0})["utilization"] == 0.0

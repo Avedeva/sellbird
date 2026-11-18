@@ -127,7 +127,15 @@ async def test_no_token_does_not_attempt_send(monkeypatch):
 @pytest.mark.asyncio
 async def test_transport_read_failure_then_recovery_sends_once(monkeypatch, tmp_path):
     from tests.test_codex_e2e import Harness, _approved_item
-    harness = Harness(monkeypatch, tmp_path, provider='claude', model='')
+    from sellbird.brain import Brain
+    import sellbird.brain as brain_mod
+    monkeypatch.setattr(brain_mod, 'RETRY_BASE_DELAY', 0, raising=False)
+
+    async def ready_local_service(self):
+        return ''
+
+    monkeypatch.setattr(Brain, 'preflight', ready_local_service)
+    harness = Harness(monkeypatch, tmp_path, provider='ollama', model='')
     await harness.state.init_db()
     await _approved_item(harness.state)
     reads, posts, after_failure = [], [], []
@@ -156,7 +164,15 @@ async def test_transport_read_failure_then_recovery_sends_once(monkeypatch, tmp_
 @pytest.mark.asyncio
 async def test_transport_second_page_unsubscribe_precedes_send(monkeypatch, tmp_path):
     from tests.test_codex_e2e import Harness, _approved_item
-    harness = Harness(monkeypatch, tmp_path, provider='claude', model='')
+    from sellbird.brain import Brain
+    import sellbird.brain as brain_mod
+    monkeypatch.setattr(brain_mod, 'RETRY_BASE_DELAY', 0, raising=False)
+
+    async def ready_local_service(self):
+        return ''
+
+    monkeypatch.setattr(Brain, 'preflight', ready_local_service)
+    harness = Harness(monkeypatch, tmp_path, provider='ollama', model='')
     await harness.state.init_db()
     await _approved_item(harness.state)
     await harness.state.mark_reply_processed('old')

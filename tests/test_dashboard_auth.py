@@ -75,7 +75,7 @@ def _protected_requests():
     for route in dash.app.routes:
         if not isinstance(route, Route):
             continue
-        if route.path in ("/", "/static/{path:path}", "/api/instance"):  # public by design
+        if route.path in ("/", "/sales-agent", "/static/{path:path}", "/api/instance"):  # public by design
             continue
         path = re.sub(r"\{[^}]+\}", "x", route.path)
         for method in sorted(route.methods - {"HEAD"}):
@@ -138,8 +138,18 @@ def test_bearer_scheme_is_case_insensitive(anon, env):
 
 
 def test_docs_and_openapi_are_gone(authed):
-    for path in ("/docs", "/redoc", "/openapi.json", "/docs/oauth2-redirect"):
+    for path in ("/docs", "/redoc", "/openapi.json", "/api/docs", "/docs/oauth2-redirect"):
         assert authed.get(path).status_code == 404
+
+
+def test_authenticated_openapi_contract_describes_bearer_protected_api(authed, anon):
+    assert anon.get("/api/openapi.json").status_code == 401
+    response = authed.get("/api/openapi.json")
+    assert response.status_code == 200
+    schema = response.json()
+    assert schema["components"]["securitySchemes"]["DashboardBearer"]["scheme"] == "bearer"
+    assert schema["paths"]["/api/sales/prospects"]["get"]["security"] == [{"DashboardBearer": []}]
+    assert "/api/sales/discover" in schema["paths"]
 
 
 def test_no_cors_preflight_is_ever_approved(anon, authed):
@@ -154,7 +164,7 @@ def test_no_cors_preflight_is_ever_approved(anon, authed):
 # ── The public shell ──
 
 
-@pytest.mark.parametrize("path", ["/", "/static/app.js", "/static/auth.js", "/static/app.css"])
+@pytest.mark.parametrize("path", ["/", "/sales-agent", "/static/app.js", "/static/auth.js", "/static/app.css", "/static/sales.js", "/static/sales.css"])
 def test_shell_is_public_but_carries_no_data_or_token(anon, env, path):
     r = anon.get(path)
     assert r.status_code == 200
@@ -177,6 +187,7 @@ def test_shell_has_no_token_bearing_links(anon):
 
 def test_only_get_and_head_of_the_shell_are_public(anon):
     assert anon.post("/").status_code == 401
+    assert anon.post("/sales-agent").status_code == 401
     assert anon.post("/static/app.js").status_code == 401
 
 
@@ -740,9 +751,10 @@ def test_real_server_started_like_the_cli(tmp_path):
     script = tmp_path / "start.py"
     script.write_text(START)
     root = Path(dash.__file__).resolve().parent.parent
+    child_pythonpath = os.pathsep.join(filter(None, [str(root), os.environ.get("PYTHONPATH", "")]))
     proc = subprocess.Popen([sys.executable, "-u", str(script), str(tmp_path), str(port)],
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-                            env={**os.environ, "PYTHONPATH": str(root)})
+                            env={**os.environ, "PYTHONPATH": child_pythonpath})
     try:
         base = f"http://127.0.0.1:{port}"
         for _ in range(200):

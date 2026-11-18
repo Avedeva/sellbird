@@ -143,17 +143,14 @@ def test_normalize_domain_is_the_entity_key():
 # ── Cost discipline ──
 
 
-def test_estimates_match_published_pricing():
+def test_only_active_discovery_provider_has_a_cost_estimate():
     q = [D.DiscoveryQuery(term="roofer", location="Denver", limit=1000, depth=30)]
-    # DataForSEO's own worked example: 1,000 items = $0.012 + $0.36 = $0.372
-    assert D.estimate_cost("dataforseo_listings", q) == pytest.approx(0.372)
-    # SERP billing is the Live price x pages; depth 30 is three pages.
-    assert D.estimate_cost("dataforseo_serp", q) == pytest.approx(0.006)
+    # Paid search/listing adapters are not in the active local-only registry.
+    assert D.estimate_cost("dataforseo_listings", q) == 0.0
+    assert D.estimate_cost("dataforseo_serp", q) == 0.0
+    assert D.estimate_cost("serper", q) == 0.0
+    assert D.estimate_cost("tinyfish", q) == 0.0
     assert D.estimate_cost("osm", q) == 0.0
-    # Scavio: 1 credit a page at the $0.01 pay-as-you-go price. Maps
-    # pages hold 20 and stop at six; Search pages hold 10.
-    assert D.estimate_cost("scavio_maps", q) == pytest.approx(6 * 0.01)
-    assert D.estimate_cost("scavio_search", q) == pytest.approx(3 * 0.01)
 
 
 @pytest.mark.asyncio
@@ -783,18 +780,11 @@ def test_dataforseo_sandbox_is_never_the_live_host():
 # ── The provider menu the dashboard renders ──
 
 
-def test_provider_menu_explains_cost_and_configuration():
+def test_provider_menu_exposes_only_the_active_free_provider():
     menu = {m["key"]: m for m in D.provider_menu({"serper_api_key": "k", "tinyfish_api_key": "tf"})}
+    assert set(menu) == {"osm"}
     assert menu["osm"]["configured"] is True and not menu["osm"]["needs_key"]
-    assert menu["serper"]["configured"] is True
-    assert menu["tinyfish"]["configured"] is True
-    assert menu["tinyfish"]["needs_key"] is True
-    assert menu["tinyfish"]["cost_note"] == "free"
-    assert "30 searches a minute" in menu["tinyfish"]["free_tier"]
-    assert "500 an hour" in menu["tinyfish"]["free_tier"]
-    assert menu["dataforseo_listings"]["configured"] is False
-    assert menu["dataforseo_listings"]["env_keys"] == [
-        "DATAFORSEO_LOGIN", "DATAFORSEO_PASSWORD"]
+    assert menu["osm"]["env_keys"] == []
     for entry in menu.values():
         assert entry["blurb"] and entry["cost_note"] and entry["signup_url"]
 
@@ -807,18 +797,11 @@ def test_the_default_provider_needs_no_account():
 
 
 @pytest.mark.asyncio
-async def test_unconfigured_provider_says_which_key_is_missing(state, config, monkeypatch):
-    from sellbird.config import EnvConfig
-    monkeypatch.setattr("sellbird.config.load_env", lambda: EnvConfig())
-    report = await D.run_discovery(state, config, "dataforseo_listings",
-                                   [D.DiscoveryQuery(term="roofer")])
-    assert report.stopped == "not configured"
-    assert "DATAFORSEO_LOGIN" in report.errors[0]
-
-    tf_report = await D.run_discovery(state, config, "tinyfish",
-                                      [D.DiscoveryQuery(term="roofer")])
-    assert tf_report.stopped == "not configured"
-    assert "TINYFISH_API_KEY" in tf_report.errors[0]
+async def test_disabled_paid_providers_are_rejected_from_the_active_registry(state, config):
+    for provider in ("dataforseo_listings", "tinyfish"):
+        with pytest.raises(ValueError, match="unknown discovery provider"):
+            await D.run_discovery(state, config, provider,
+                                  [D.DiscoveryQuery(term="roofer")])
 
 
 @pytest.mark.asyncio
@@ -869,7 +852,7 @@ async def test_template_placeholder_key_is_treated_as_missing(state, config,
     ("placeholder-team@example.com", False),           # DataForSEO logins are emails
 ])
 def test_missing_keys_flags_template_placeholders_not_real_keys(value, missing):
-    assert bool(D.PROVIDERS["serper"].missing_keys(
+    assert bool(D.Serper().missing_keys(
         {"serper_api_key": value})) is missing
 
 
@@ -951,12 +934,13 @@ async def test_overpass_falls_over_to_the_next_mirror(monkeypatch):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("status", [429, 500, 502, 503, 504])
+@pytest.mark.parametrize("status", [406, 429, 500, 502, 503, 504])
 async def test_a_mirror_failing_transiently_hands_over_to_the_next(status, monkeypatch):
     """502 is the one that bit us: only 429 and 504 used to count as "try the
     next one", so a bad gateway on the first mirror sank a search the second
     mirror could have answered."""
     monkeypatch.setattr(D.OpenStreetMap, "BACKOFF", 0.0)
+    monkeypatch.setattr(D.OpenStreetMap, "RATE_LIMIT_BACKOFF", 0.0)
     seen = []
 
     def handler(request):
@@ -1026,6 +1010,28 @@ def test_the_mirrors_are_separate_instances():
     assert len(set(hosts)) == len(hosts), "the same host twice is not a mirror"
     aliases = {"overpass.kumi.systems", "overpass.private.coffee"}
     assert len(aliases & set(hosts)) <= 1, "those two are one instance"
+
+
+def test_public_map_endpoints_can_be_changed_without_a_code_update(monkeypatch):
+    monkeypatch.setenv("SELLBIRD_OVERPASS_URLS", "https://overpass.example/api,https://maps.example/interpreter")
+    assert D.OpenStreetMap.endpoints() == (
+        "https://overpass.example/api", "https://maps.example/interpreter")
+    monkeypatch.setenv("SELLBIRD_OVERPASS_URLS", "http://overpass.example/api")
+    with pytest.raises(ValueError, match="HTTPS URL"):
+        D.OpenStreetMap.endpoints()
+
+
+def test_nominatim_endpoint_is_operator_configurable_and_https_only(monkeypatch):
+    monkeypatch.setenv("SELLBIRD_NOMINATIM_URL", "https://geo.example/search")
+    assert D.nominatim_endpoint() == "https://geo.example/search"
+    monkeypatch.setenv("SELLBIRD_NOMINATIM_URL", "http://geo.example/search")
+    with pytest.raises(ValueError, match="HTTPS URL"):
+        D.nominatim_endpoint()
+
+
+def test_public_overpass_rate_limit_policy_is_explicit():
+    assert D.OpenStreetMap.RATE_LIMIT_STATUSES == {406, 429}
+    assert D.OpenStreetMap.RATE_LIMIT_BACKOFF == 30.0
 
 
 @pytest.mark.asyncio
@@ -1195,6 +1201,10 @@ async def test_osm_maps_the_trades_it_does_know():
     assert provider._tags("Residential roofing") == ["craft=roofer", "shop=roofing"]
     assert provider._tags("Emergency plumber") == ["craft=plumber"]
     assert provider._tags("cosmetic dentist") == ["amenity=dentist"]
+    assert provider._tags("accountant") == ["office=accountant"]
+    assert provider._tags("pharmacy") == ["amenity=pharmacy"]
+    assert provider._tags("supermarket") == ["shop=supermarket"]
+    assert provider._tags("bakery") == ["shop=bakery"]
     assert provider._tags("B2B SaaS") == []
 
 
@@ -1255,6 +1265,9 @@ def test_site_name_prefers_og_then_title_and_needs_domain_backing():
 @pytest.mark.asyncio
 @pytest.mark.parametrize('provider', ['serper', 'dataforseo_serp', 'scavio_search'])
 async def test_directory_title_still_filtered_after_adapter(provider, tmp_path, monkeypatch):
+    adapter = {"serper": D.Serper, "dataforseo_serp": D.DataForSEOSerp,
+               "scavio_search": D.ScavioSearch}[provider]()
+    monkeypatch.setitem(D.PROVIDERS, provider, adapter)
     title = 'Top 10 Roofing Companies in Denver'
     domain = 'milehighguide.com'
     assert D.is_junk(domain, title)
@@ -1346,33 +1359,13 @@ def _fake_env(monkeypatch, **values):
         lambda: SimpleNamespace(model_dump=lambda: dict(values)))
 
 
-def test_missing_key_fails_loudly_at_startup(monkeypatch, capsys):
-    _fake_env(monkeypatch, serper_api_key="")
-    with pytest.raises(SystemExit) as ei:
-        cmd_discover(_cli_args())
-    assert ei.value.code == 1
+@pytest.mark.parametrize("api_key", ["", "your_key_here", "a-real-looking-key"])
+def test_disabled_paid_provider_is_rejected_regardless_of_key(monkeypatch, capsys, api_key):
+    _fake_env(monkeypatch, serper_api_key=api_key)
+    cmd_discover(_cli_args())
     out = capsys.readouterr().out
-    assert "provider skipped: missing key" in out
-    assert "SERPER_API_KEY" in out
-    assert "0 queries can run" in out
-    # The guard fires before the estimate is even attempted.
+    assert "Unknown provider 'serper'" in out
     assert "Estimated cost" not in out
-
-
-def test_placeholder_key_is_treated_as_missing(monkeypatch, capsys):
-    _fake_env(monkeypatch, serper_api_key="your_key_here")
-    with pytest.raises(SystemExit) as ei:
-        cmd_discover(_cli_args())
-    assert ei.value.code == 1
-    assert "provider skipped: missing key" in capsys.readouterr().out
-
-
-def test_absent_key_is_treated_as_missing(monkeypatch, capsys):
-    _fake_env(monkeypatch)
-    with pytest.raises(SystemExit) as ei:
-        cmd_discover(_cli_args())
-    assert ei.value.code == 1
-    assert "SERPER_API_KEY" in capsys.readouterr().out
 
 
 def test_keyless_default_provider_is_never_blocked(monkeypatch, capsys):
@@ -1616,6 +1609,7 @@ async def test_failed_attempt_is_not_a_successful_query(state, config, register)
 @pytest.mark.parametrize("attempted,succeeded", [(0, 0), (2, 0), (2, 1), (1, 1)])
 def test_cli_exit_tracks_successful_queries(monkeypatch, config, attempted, succeeded):
     from sellbird import config as cfg, pipeline
+    monkeypatch.setitem(D.PROVIDERS, "serper", D.Serper())
     _fake_env(monkeypatch, serper_api_key="fixture")
     monkeypatch.setattr(cfg, "load_config", lambda: config)
     async def init_db(self):

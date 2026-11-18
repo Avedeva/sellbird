@@ -143,7 +143,8 @@ def test_windows_setup_checks_refuse_codex(native_home, on_windows):
 
 
 @pytest.mark.asyncio
-async def test_windows_quota_and_brain_pause_cleanly(on_windows, tmp_path):
+async def test_windows_brain_uses_only_ollama_and_pauses_if_local_service_is_missing(on_windows, tmp_path,
+                                                                                   monkeypatch):
     import json as _json
 
     from sellbird.brain import BRAIN_STATUS_KEY, Brain
@@ -152,44 +153,38 @@ async def test_windows_quota_and_brain_pause_cleanly(on_windows, tmp_path):
 
     state = StateManager(str(tmp_path / "w.db"))
     await state.init_db()
-    brain = Brain(state, BrainConfig(provider="codex", model="gpt-5.5"))
-    assert await brain.quota.get_utilization() is None
+    brain = Brain(state, BrainConfig(provider="ollama", model="qwen3:4b"))
+
+    async def missing_local_model():
+        return {"status": "unavailable", "error": "Ollama is not reachable"}
+
+    monkeypatch.setattr(brain.ai, "health", missing_local_model)
     problem = await brain.preflight()
-    assert "macOS and Linux" in problem
+    assert problem == "Ollama is not reachable"
     stored = _json.loads(await state.get_setting(BRAIN_STATUS_KEY))
-    assert stored["status"] == "paused" and stored["kind"] == "setup"
+    assert stored["status"] == "paused" and stored["provider"] == "ollama"
     assert await brain.think("hi") == ""
 
 
-def test_windows_setup_offers_claude_instead(monkeypatch, on_windows, capsys):
+def test_windows_setup_chooses_local_ollama_only(monkeypatch, on_windows, capsys):
     import sellbird.setup as setup_mod
     from sellbird.config import BrainConfig
 
-    answers = iter(["codex", "claude", ""])
-    monkeypatch.setattr(setup_mod, "_ask", lambda *a, **k: next(answers))
-    assert setup_mod._ask_brain_config() == BrainConfig()
-    assert "macOS and Linux" in capsys.readouterr().out
+    monkeypatch.setattr(setup_mod, "_ask", lambda *a, **kw: kw.get("default", ""))
+    assert setup_mod._ask_brain_config() == BrainConfig(provider="ollama", model="qwen3:4b")
+    assert "through Ollama" in capsys.readouterr().out
 
 
 @pytest.mark.asyncio
-async def test_claude_is_unaffected_on_windows(on_windows, monkeypatch, tmp_path):
-    import sellbird.brain as brain_mod
+async def test_brain_test_transport_is_unaffected_on_windows(on_windows, tmp_path):
     from sellbird.brain import Brain
     from sellbird.state import StateManager
 
-    class Proc:
-        returncode = 0
-
-        async def communicate(self, data=None):
-            return b'{"type": "result", "result": "ok", "session_id": "s"}', b""
-
-    async def fake_claude(*cmd, **kwargs):
-        assert cmd[0] == "claude"
-        return Proc()
-
-    monkeypatch.setattr(brain_mod.asyncio, "create_subprocess_exec", fake_claude)
     state = StateManager(str(tmp_path / "c.db"))
     await state.init_db()
-    brain = Brain(state)
+    async def fake_local(prompt, **kwargs):
+        return "ok"
+
+    brain = Brain(state, transport=fake_local)
     assert await brain.preflight() == ""
     assert await brain.think("hello") == "ok"
