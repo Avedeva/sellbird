@@ -172,28 +172,15 @@ class Scout:
 
         # Each strategy is isolated so one failing does not abort the cycle.
         strategies = []
-        # Hunter first, if configured: real named people with a real
-        # verification verdict beats a scrape guess, but the free tier's
-        # monthly budget (HUNTER_MONTHLY_SEARCHES, 25 by default) is small —
-        # self-skips once it's spent.
-        strategies.append(("hunter", self._prospect_via_hunter))
         # Backfill next: companies already on file (e.g. from `sellbird
         # discover`) but with zero prospects. Scrapes each company's own
         # site directly, so it costs no search-query budget and isn't at
         # the mercy of Serper/Bing flakiness — cheapest, most reliable win
         # available before spending any queries.
         strategies.append(("known_companies", self._prospect_via_known_companies))
-        if self.config.channels.linkedin.enabled and self.env.linkedin_email:
-            strategies.append(("linkedin", self._prospect_via_linkedin))
         # Job boards first: hiring is the strongest intent signal, and the
         # strategy self-skips when python-jobspy isn't installed.
         strategies.append(("hiring_boards", self._prospect_via_hiring_boards))
-        # Web search for LinkedIn profiles yields names without a company or
-        # email, which Sellbird can't verify; it rides the same switch as the
-        # LinkedIn channel (and its login) so it is off unless LinkedIn
-        # prospecting is wanted, and doesn't spend the cycle's query budget.
-        if self.config.channels.linkedin.enabled and self.env.linkedin_email:
-            strategies.append(("profile_search", self._prospect_via_profile_search))
         strategies.append(("company_discovery", self._prospect_via_company_discovery))
 
         for name, strategy in strategies:
@@ -392,7 +379,7 @@ class Scout:
         """Search the web using the best available backend.
 
         Returns list of (url, snippet) tuples.
-        Tries backends in order: Serper API → TinyFish Search API → DuckDuckGo → Bing → Google.
+        Uses public search pages only. Paid API search providers are disabled.
         """
         if self._queries_this_cycle >= MAX_QUERIES_PER_CYCLE:
             logger.info("Scout: Query limit reached for this cycle. Will continue next cycle.")
@@ -404,18 +391,11 @@ class Scout:
         if self._queries_this_cycle > 1:
             await asyncio.sleep(random.uniform(*SEARCH_DELAY))
 
-        serper_key = getattr(self.env, "serper_api_key", "") or ""
-        tinyfish_key = getattr(self.env, "tinyfish_api_key", "") or ""
-        backends = []
-        if serper_key:
-            backends.append(lambda: self._search_serper(query, serper_key))
-        if tinyfish_key:
-            backends.append(lambda: self._search_tinyfish(query, tinyfish_key))
-        backends.extend([
+        backends = [
             lambda: self._search_duckduckgo(query),
             lambda: self._search_bing(query),
             lambda: self._search_google(query),
-        ])
+        ]
 
         for backend in backends:
             try:

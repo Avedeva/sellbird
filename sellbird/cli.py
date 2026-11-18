@@ -5,6 +5,7 @@ import asyncio
 import subprocess
 import sys
 import textwrap
+from datetime import date
 from pathlib import Path
 
 
@@ -158,7 +159,6 @@ def cmd_train(args):
             k: v for k, v in (
                 ("provider", args.provider),
                 ("model", args.model),
-                ("reasoning_effort", args.reasoning_effort),
             ) if v is not None
         }
         if overrides:
@@ -237,8 +237,14 @@ def cmd_status(args):
         print(f"  Active campaigns:     {summary['active_campaigns']}")
         print(f"  Open conversations:   {summary['open_conversations']}")
         by_provider = summary.get("usage_today_by_provider", {})
-        print(f"  Claude calls today:   {by_provider.get('claude', summary['usage_today'])}")
-        print(f"  Codex calls today:    {by_provider.get('codex', 0)}")
+        from sellbird.sales_store import SalesStore
+        from sellbird.workspace_home import current_home
+        sales_store = SalesStore(current_home().db_path)
+        await sales_store.ensure()
+        inference_logs = await sales_store.inference_logs(limit=10000)
+        day = date.today().isoformat()
+        local_calls = sum(1 for row in inference_logs if str(row.get("created_at", "")).startswith(day))
+        print(f"  Local Ollama calls today: {local_calls}")
         from sellbird.config import compliance_notice, load_config, sending_notice
         loaded = None
         try:
@@ -307,14 +313,10 @@ def cmd_status(args):
                     healthy = False
                     print(f"  Brain:                {label} NOT READY")
                     print(f"                        {problem}")
-                elif brain.provider == "codex":
-                    print(f"  Brain:                {label} ready (CLI, isolation, login, "
-                          "model and account checked; no prompt sent)")
                 else:
-                    print(f"  Brain:                {label} CLI isolation flags present "
-                          "(login not checked: Claude is checked by its first call)")
+                    print(f"  Brain:                {label} ready (local endpoint and model checked; no prompt sent)")
         elif brain_status.get("status") == "paused":
-            label = {"claude": "Claude", "codex": "Codex"}.get(brain_status.get("provider"), "Brain")
+            label = {"ollama": "Ollama (local)"}.get(brain_status.get("provider"), "Brain")
             print(f"  Brain:                {label} PAUSED since {brain_status.get('since', '?')}")
             print(f"                        {brain_status.get('reason', '')}")
         print()
@@ -340,36 +342,10 @@ def cmd_usage(args):
             print(f"  {e}")
             brain_config = None
 
-        # Live quota for the ACTIVE provider only (best-effort). Each
-        # subscription's gauge is read from its own source and labelled as
-        # such; one is never shown as the other.
-        windows = None
         provider = brain_config.provider if brain_config else None
-        try:
-            if provider == "codex":
-                from sellbird.codex import CodexClient, CodexQuotaClient
-                windows = await CodexQuotaClient(
-                    CodexClient(model=brain_config.model)).get_utilization()
-            elif provider == "claude":
-                from sellbird.integrations.quota import QuotaClient
-                windows = await QuotaClient().get_utilization()
-        except Exception:
-            pass
-
-        label = {"claude": "Claude", "codex": "Codex"}.get(provider, "Brain")
-        print(f"\n  {label} Usage")
+        print("\n  Local Ollama Usage")
         print("  " + "=" * 52)
-        if windows:
-            labels = {"five_hour": "5-hour window", "seven_day": "Weekly",
-                      "limit_reached": "Usage limit"}
-            for key, w in windows.items():
-                resets = f"  (resets {w['resets_at']})" if w.get("resets_at") else ""
-                print(f"  {labels.get(key, key):<16} {w['utilization']:5.1f}% used{resets}")
-        elif provider == "codex":
-            print("  Quota gauge unavailable (check 'codex login', the Codex CLI "
-                  "version, and network).")
-        elif provider == "claude":
-            print("  Quota gauge unavailable (run 'claude login' or check network).")
+        print("  Inference is local; no subscription quota or token charge applies.")
 
         totals = await state.usage_totals()
         print()
@@ -382,14 +358,14 @@ def cmd_usage(args):
                 f"{t.get('cache_read_tokens', 0):>12,}"
             )
 
-        by_provider = await state.usage_by_provider(days=args.days)
-        if len(by_provider) > 1 or (by_provider and by_provider[0]["provider"] != "claude"):
-            print(f"\n  By provider (last {args.days} days):")
-            for row in by_provider:
-                print(
-                    f"    {row['provider']:<14} {row['calls']:>5} calls  "
-                    f"{row['output_tokens']:>10,} out tokens"
-                )
+        from sellbird.sales_store import SalesStore
+        from sellbird.workspace_home import current_home
+        sales_store = SalesStore(current_home().db_path)
+        await sales_store.ensure()
+        local_logs = await sales_store.inference_logs(limit=10000)
+        today = date.today().isoformat()
+        local_today = sum(1 for row in local_logs if str(row.get("created_at", "")).startswith(today))
+        print(f"\n  Local Ollama requests today: {local_today}")
 
         by_agent = await state.usage_by_agent(days=args.days)
         if by_agent:
@@ -409,8 +385,8 @@ def cmd_usage(args):
                     f"{row['output_tokens']:>10,} out tokens"
                 )
         print(
-            "\n  Subscription plans aren't billed per token — these are usage"
-            "\n  counts, not costs.\n"
+            "\n  Local inference has no token-billed service. Detailed workflow"
+            "\n  status and request logs are in the dashboard.\n"
         )
 
     asyncio.run(_usage())
@@ -1151,14 +1127,10 @@ def main():
         help="Max pages to crawl (default: 100)",
     )
     sub.add_argument(
-        "--provider", choices=["claude", "codex"], default=None,
-        help="Subscription to think with (default: the one in your config, else claude)",
+        "--provider", choices=["ollama"], default=None,
+        help="Local inference provider (only Ollama is supported)",
     )
     sub.add_argument("--model", default=None, help="Model for this provider (default: provider default)")
-    sub.add_argument(
-        "--reasoning-effort", default=None,
-        help="Codex reasoning effort (minimal/low/medium/high/xhigh)",
-    )
     sub.set_defaults(func=cmd_train)
 
     # sellbird dashboard
@@ -1175,8 +1147,7 @@ def main():
     sub = subparsers.add_parser("status", help="Show pipeline status")
     sub.add_argument(
         "--check", action="store_true",
-        help="Also check the configured brain now (Codex: CLI version, isolation "
-             "and login; Claude: CLI isolation flags; no model call)",
+        help="Also check the configured local Ollama endpoint and model; no prompt is sent",
     )
     sub.set_defaults(func=cmd_status)
 
@@ -1299,7 +1270,7 @@ def main():
     sub.set_defaults(func=cmd_precleared_key)
 
     # sellbird usage
-    sub = subparsers.add_parser("usage", help="Show brain usage and quota (Claude or Codex)")
+    sub = subparsers.add_parser("usage", help="Show local inference and historical usage")
     sub.add_argument("--days", type=int, default=30, help="Breakdown window (default: 30)")
     sub.set_defaults(func=cmd_usage)
 
@@ -1307,8 +1278,8 @@ def main():
         "mcp", help="MCP server for your coding agent (launched by it, over stdio)")
     sub.add_argument("mcp_action", nargs="?", choices=["install", "uninstall"],
                      help="Add or remove the server in your coding agent's config")
-    sub.add_argument("client", nargs="?", choices=["claude", "codex"],
-                     help="Which agent (default: Claude Code only)")
+    sub.add_argument("client", nargs="?", choices=["claude", "codex"], default="claude",
+                     help="Coding agent config to update (default: claude)")
     sub.add_argument("--print", dest="print_config", action="store_true",
                      help="Print the config to add by hand; change nothing")
     sub.add_argument("--yes", action="store_true", help="Apply without asking")

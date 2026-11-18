@@ -497,30 +497,12 @@ async def derive_pattern(
     if cached and cached.get("pattern") and source not in WEAK_SOURCES:
         return cached["pattern"], source or "cache", cached.get("confidence", 0.6)
 
-    # A site guess is better than nothing, but Hunter gets one look first.
+    # The local-only build uses cached, site-published evidence only. Paid
+    # email discovery/enrichment providers are deliberately not called.
     site_guess = cached if cached and cached.get("pattern") and source.startswith("site_address_guess") else None
-    hunter_tried = source.endswith("_after_hunter")
-    key = _hunter_api_key()
-    if key and not hunter_tried and await hunter_searches_remaining(state) > 0:
-        await record_hunter_search(state)
-        try:
-            result = await _hunter_domain_pattern(domain, key)
-            answered = True
-        except HunterUnavailable as e:
-            # Transient: not remembered, so it's asked again next time.
-            logger.debug(f"Hunter unavailable for {domain}: {e}")
-            result, answered = None, False
-        if result:
-            return result[0], "hunter_domain_search", result[1]
-        if answered:
-            # Remembered, so the monthly budget isn't spent on this domain again.
-            if site_guess:
-                return site_guess["pattern"], "site_address_guess_after_hunter", site_guess.get("confidence", 0.6)
-            return default_pattern, "default_after_hunter", 0.3
-
     if site_guess:
         return site_guess["pattern"], source, site_guess.get("confidence", 0.6)
-    return default_pattern, source if hunter_tried else "default", 0.3
+    return default_pattern, "default", 0.3
 
 
 # ── Verification channels ──
@@ -671,43 +653,9 @@ async def _verify_candidate(email: str, mx_type: str, env) -> tuple[Optional[str
     Returns (status_or_None, catch_all_seen). Order is chosen so scarce
     paid-ish credits are spent only where they actually resolve the domain.
     """
-    reoon_key = getattr(env, "reoon_api_key", "") if env else ""
-    zerobounce_key = getattr(env, "zerobounce_api_key", "") if env else ""
-    hunter_key = _hunter_api_key()
-
     catch_all_seen = False
-
-    # Big providers: ZeroBounce first (its engine cracks their catch-alls),
-    # then Reoon, then Hunter. SMTP is useless/misleading here.
-    if mx_type in ("google", "microsoft", "gateway"):
-        channels = []
-        if zerobounce_key:
-            channels.append(lambda: verify_zerobounce(email, zerobounce_key))
-        if reoon_key:
-            channels.append(lambda: verify_reoon(email, reoon_key))
-        if hunter_key:
-            channels.append(lambda: verify_hunter(email, hunter_key))
-        for channel in channels:
-            verdict = await channel()
-            if verdict is None:
-                continue
-            if verdict.get("catch_all"):
-                catch_all_seen = True
-            status = _status_from_verdict(verdict)
-            if status is not None:
-                return status, catch_all_seen
-        return None, catch_all_seen
-
-    # Small / self-hosted: Reoon → SMTP (still works here) → Hunter.
-    if reoon_key:
-        verdict = await verify_reoon(email, reoon_key)
-        if verdict:
-            if verdict.get("catch_all"):
-                catch_all_seen = True
-            status = _status_from_verdict(verdict)
-            if status is not None:
-                return status, catch_all_seen
-
+    # Only DNS/SMTP checks run here. They contact mail infrastructure directly
+    # and do not send contact data to a paid enrichment service.
     smtp = await verify_email_smtp(email)
     if smtp is True:
         # Confirm it's not just a catch-all before trusting "verified".
@@ -716,15 +664,6 @@ async def _verify_candidate(email: str, mx_type: str, env) -> tuple[Optional[str
         return "verified", catch_all_seen
     if smtp is False:
         return "invalid", catch_all_seen
-
-    if hunter_key:
-        verdict = await verify_hunter(email, hunter_key)
-        if verdict:
-            if verdict.get("catch_all"):
-                catch_all_seen = True
-            status = _status_from_verdict(verdict)
-            if status is not None:
-                return status, catch_all_seen
 
     return None, catch_all_seen
 

@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="same-origin">
+  <title>Local AI Sales Agent · Sellbird</title>
+  <script src="/static/auth.js"></script>
+  <link rel="stylesheet" href="/static/sales.css">
+</head>
+<body>
+  <header class="topbar">
+    <div><a class="brand" href="/">Sellbird</a><span class="crumb">/ Local AI Sales Agent</span></div>
+    <div class="context-selectors">
+      <label>Business <select id="company-select" aria-label="Selected business"></select></label>
+      <label>Product <select id="product-select" aria-label="Selected product"></select></label>
+      <span id="ai-status" class="pill">Checking local model…</span>
+    </div>
+  </header>
+  <div class="layout">
+    <nav class="side-nav" aria-label="Sales agent sections">
+      <button class="nav active" data-panel="overview">Overview</button>
+      <button class="nav" data-panel="setup">Business & products</button>
+      <button class="nav" data-panel="prospects">Prospects</button>
+      <button class="nav" data-panel="replies">Reply classification</button>
+      <button class="nav" data-panel="system">System & inference</button>
+      <a href="/" class="back-link">← Harvey dashboard</a>
+    </nav>
+    <main>
+      <div id="notice" role="status" aria-live="polite"></div>
+      <section class="panel active" id="panel-overview">
+        <div class="page-title"><div><p class="eyebrow">LOCAL-FIRST PROSPECTING</p><h1>Sales agent</h1>
+          <p>Product-aware research, qualification and outreach using your local Ollama model.</p></div>
+          <button class="button secondary" id="refresh-overview">Refresh data</button></div>
+        <div class="metric-grid" id="metrics"></div>
+        <div class="columns">
+          <article class="card"><h2>Selected sales context</h2><div id="selected-context" class="muted">Choose a business and product to start.</div></article>
+          <article class="card"><h2>Workflow status</h2><div id="workflow-status" class="muted">Connect a local Ollama model to enable AI workflows. Scoring remains deterministic.</div></article>
+        </div>
+        <div class="card"><div class="card-head"><div><h2>Recent workflow output</h2><p class="muted">Saved to the local SQLite database.</p></div></div><div id="recent-artifacts" class="empty">No generated workflows yet.</div></div>
+      </section>
+
+      <section class="panel" id="panel-setup">
+        <div class="page-title"><div><p class="eyebrow">YOUR CONTEXT</p><h1>Business & products</h1><p>Each product keeps its own ICP, research interpretation, scoring and outreach context.</p></div></div>
+        <div class="columns">
+          <article class="card">
+            <h2>Business profile</h2>
+            <form id="company-form" class="form-grid">
+              <label>Company name<input name="name" required maxlength="200"></label>
+              <label>Industry<input name="industry"></label>
+              <label>Website<input name="website" type="url" placeholder="https://example.com"></label>
+              <label>Company size<input name="company_size" placeholder="e.g. 20–100 employees"></label>
+              <label>Target geography<input name="target_geography"></label>
+              <label>Business model<input name="business_model"></label>
+              <label class="wide">Company description<textarea name="description" rows="3"></textarea></label>
+              <label class="wide">Existing sales information<textarea name="existing_sales_information" rows="3"></textarea></label>
+              <div class="form-actions"><button class="button primary" type="submit">Save business</button><button class="button secondary" id="generate-profile" type="button">Generate business profile</button></div>
+            </form>
+            <pre id="profile-output" class="output hidden"></pre>
+            <label class="wide">Editable generated profile (JSON)<textarea id="profile-edit" rows="6" spellcheck="false"></textarea></label>
+            <button class="button secondary" id="save-profile" type="button">Save edited profile</button>
+          </article>
+          <article class="card">
+            <h2>Product context</h2>
+            <form id="product-form" class="form-grid">
+              <label>Product name<input name="name" required maxlength="200"></label>
+              <label>Pricing<input name="pricing" placeholder="Optional, factual pricing only"></label>
+              <label class="wide">Description<textarea name="description" rows="2"></textarea></label>
+              <label class="wide">Features <small>comma separated</small><textarea name="features" rows="2"></textarea></label>
+              <label class="wide">Benefits <small>comma separated</small><textarea name="benefits" rows="2"></textarea></label>
+              <label class="wide">Target market<textarea name="target_market" rows="2"></textarea></label>
+              <label class="wide">Value proposition<textarea name="value_proposition" rows="2"></textarea></label>
+              <label class="wide">Competitive differentiation<textarea name="competitive_differentiation" rows="2"></textarea></label>
+              <label class="wide">Customer pain points <small>comma separated</small><textarea name="customer_pain_points" rows="2"></textarea></label>
+              <label class="wide">Sales positioning<textarea name="sales_positioning" rows="2"></textarea></label>
+              <label class="wide">ICP criteria (JSON)<textarea name="icp_criteria" rows="3" placeholder='{"target_industries":["..."],"company_size":"..."}'></textarea></label>
+              <div class="form-actions"><button class="button primary" type="submit">Save product</button><button class="button secondary" id="generate-icp" type="button">Generate product ICP</button></div>
+            </form>
+            <pre id="icp-output" class="output hidden"></pre>
+            <label class="wide">Editable generated ICP (JSON)<textarea id="icp-edit" rows="7" spellcheck="false"></textarea></label>
+            <button class="button secondary" id="save-icp" type="button">Save edited ICP</button>
+          </article>
+        </div>
+      </section>
+
+      <section class="panel" id="panel-prospects">
+        <div class="page-title"><div><p class="eyebrow">PROSPECT WORKSPACE</p><h1>Prospects</h1><p>Import records, cache permitted public research, then run product-specific analysis.</p></div></div>
+        <div class="columns">
+          <article class="card"><h2>Discover local businesses</h2><p class="muted">Free OpenStreetMap search. Coverage varies; results do not include personal contacts, employee counts or revenue. Searching uses public Nominatim and Overpass services and is unavailable in offline mode.</p>
+            <form id="discover-form" class="form-grid">
+              <label>Business category<input name="term" list="osm-categories" placeholder="roofer" required minlength="2" maxlength="100"><datalist id="osm-categories"><option value="roofer"><option value="plumber"><option value="HVAC"><option value="electrician"><option value="dentist"><option value="lawyer"><option value="contractor"><option value="landscaper"><option value="accountant"><option value="pharmacy"><option value="supermarket"><option value="bakery"></datalist></label>
+              <label>City or place<input name="location" placeholder="Denver, CO" required minlength="2" maxlength="200"></label>
+              <label>Radius (km)<input name="radius_km" type="number" min="1" max="80" value="25" required></label>
+              <label>Maximum results<input name="limit" type="number" min="1" max="100" value="25" required></label>
+              <div class="form-actions"><button class="button primary" type="submit">Search OpenStreetMap</button></div>
+            </form>
+            <pre id="discovery-output" class="output hidden"></pre>
+            <p class="muted osm-attribution">Map data © <a href="https://www.openstreetmap.org/copyright">OpenStreetMap contributors</a>, available under the Open Database License (ODbL).</p>
+          </article>
+          <article class="card"><h2>Add prospect</h2>
+            <form id="prospect-form" class="form-grid">
+              <label>Company name<input name="company_name" required></label><label>Website<input name="website" placeholder="https://example.com"></label>
+              <label>Industry<input name="industry"></label><label>Location<input name="location"></label>
+              <label>Employees<input name="employee_count" type="number" min="0"></label><label>Revenue range<input name="revenue_range"></label>
+              <label>Contact name<input name="contact_name"></label><label>Job title<input name="job_title"></label>
+              <label>Business email<input name="business_email" type="email"></label><label>Phone<input name="phone"></label>
+              <label class="wide">Company description<textarea name="company_description" rows="2"></textarea></label>
+              <label class="wide">Source URL<input name="source_url" type="url"></label>
+              <div class="form-actions"><button class="button primary" type="submit">Add prospect</button></div>
+            </form>
+          </article>
+          <article class="card"><h2>Import CSV</h2><p class="muted">Required column: <code>company_name</code> (or Company). Supported fields include website, industry, location, description, employees, revenue, contact name, job title, email and source URL.</p>
+            <label class="file-pick">Choose CSV<input id="csv-file" type="file" accept=".csv,text/csv"></label><button class="button secondary" id="import-csv" type="button">Import selected file</button><div id="import-result" class="muted"></div>
+          </article>
+        </div>
+        <article class="card"><div class="card-head"><div><h2>Prospect list</h2><p class="muted">Scored prospects appear first for the selected product. Every analysis stays product-specific.</p></div><div class="card-tools"><label>Filter<input id="prospect-filter" type="search" placeholder="Name, industry, location…"></label><label>Email style <select id="email-style"><option value="professional">Professional</option><option value="conversational">Conversational</option><option value="concise">Concise</option><option value="consultative">Consultative</option></select></label><button class="button secondary" id="refresh-prospects">Refresh</button></div></div><div id="prospect-list" class="empty">Create a business first.</div></article>
+        <article class="card"><div class="card-head"><div><h2>Selected prospect output</h2><p class="muted">Evidence and workflow results are saved locally.</p></div><button class="button secondary" id="copy-email" type="button">Copy email</button></div><pre id="prospect-output" class="output">Select a prospect and run a workflow.</pre></article>
+      </section>
+
+      <section class="panel" id="panel-replies">
+        <div class="page-title"><div><p class="eyebrow">INBOX INTELLIGENCE</p><h1>Reply classification</h1><p>Classify a supplied reply locally. Demonstration text is labelled as sample data.</p></div></div>
+        <article class="card reply-card">
+          <label>Reply text<textarea id="reply-text" rows="7" placeholder="Paste a reply or use one of the labelled sample messages."></textarea></label>
+          <div class="reply-actions"><label class="check"><input type="checkbox" id="reply-sample"> This is demonstration/sample text</label><button class="button primary" id="classify-reply">Classify reply</button></div>
+          <div id="sample-buttons" class="sample-buttons"><span class="muted">Select a product to load its stored sample conversations.</span></div>
+          <pre id="reply-output" class="output hidden"></pre>
+        </article>
+      </section>
+
+      <section class="panel" id="panel-system">
+        <div class="page-title"><div><p class="eyebrow">LOCAL RUNTIME</p><h1>System & inference</h1><p>Inspect hardware, local model availability and content-free inference logs.</p></div><button class="button secondary" id="refresh-system">Refresh status</button></div>
+        <article class="card offline-card"><div><h2>Offline mode</h2><p class="muted">Turns off fresh public-web research. Ollama workflows continue locally when the local model is installed.</p></div><label class="toggle-label"><input id="offline-toggle" type="checkbox"><span>Offline</span></label></article>
+        <div class="columns"><article class="card"><h2>Local inference</h2><div id="model-status" class="muted">Loading…</div></article><article class="card"><h2>Hardware & recommendations</h2><div id="hardware-status" class="muted">Loading…</div></article></div>
+        <article class="card"><h2>Queued local workflows</h2><p class="muted">A request stays here if Ollama is unavailable. Retry after the configured local model is ready.</p><div id="queued-tasks" class="empty">No queued workflows.</div><pre id="task-output" class="output hidden"></pre></article>
+        <article class="card"><h2>Recent inference log</h2><div id="inference-logs" class="empty">No local inference has been recorded.</div></article>
+      </section>
+    </main>
+  </div>
+  <script src="/static/sales.js"></script>
+</body>
+</html>

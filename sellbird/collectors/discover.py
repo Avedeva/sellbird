@@ -25,6 +25,7 @@ import time
 import base64
 import logging
 import math
+import os
 import re
 from html import unescape
 from dataclasses import dataclass, field, replace
@@ -282,11 +283,30 @@ def is_junk(domain: str, name: str = "") -> bool:
 
 NOMINATIM = "https://nominatim.openstreetmap.org/search"
 GEOCODE_UA = "Sellbird/0.1 (open-source sales agent; github.com/ethanplusai/sellbird)"
+_geocode_request_lock = asyncio.Lock()
+_geocode_next_allowed = 0.0
+
+
+def _configured_https_url(value: str, *, label: str) -> str:
+    """Validate operator-selected public service URLs before sending data."""
+    parsed = urlparse(value.strip())
+    if (parsed.scheme != "https" or not parsed.hostname or parsed.username
+            or parsed.password or parsed.query or parsed.fragment):
+        raise ValueError(f"{label} must be an HTTPS URL without credentials, query, or fragment")
+    return value.strip()
+
+
+def nominatim_endpoint() -> str:
+    return _configured_https_url(
+        os.environ.get("SELLBIRD_NOMINATIM_URL", NOMINATIM),
+        label="SELLBIRD_NOMINATIM_URL",
+    )
 
 
 async def geocode_city(state, city: str, radius_km: int = 40,
                        client: httpx.AsyncClient | None = None) -> str:
     """"Denver, CO" -> "39.7392,-104.9903,40". Cached permanently."""
+    global _geocode_next_allowed
     if not city:
         return ""
     cache_key = f"geo:{city.strip().lower()}"
@@ -298,13 +318,23 @@ async def geocode_city(state, city: str, radius_km: int = 40,
     owned = client is None
     client = client or httpx.AsyncClient(timeout=TIMEOUT)
     try:
-        r = await client.get(
-            NOMINATIM,
-            params={"q": city, "format": "json", "limit": 1},
-            headers={"User-Agent": GEOCODE_UA},
-        )
-        r.raise_for_status()
-        hits = r.json()
+        async with _geocode_request_lock:
+            # Recheck after taking the lock so simultaneous searches for the
+            # same place do not issue duplicate Nominatim requests.
+            cached = await state.get_setting(cache_key)
+            if cached:
+                return "" if cached == "-" else f"{cached},{radius_km}"
+            wait = 1.1 - (time.monotonic() - _geocode_next_allowed)
+            if _geocode_next_allowed and wait > 0:
+                await asyncio.sleep(wait)
+            _geocode_next_allowed = time.monotonic()
+            r = await client.get(
+                nominatim_endpoint(),
+                params={"q": city, "format": "json", "limit": 1},
+                headers={"User-Agent": GEOCODE_UA},
+            )
+            r.raise_for_status()
+            hits = r.json()
     except Exception as e:
         logger.warning("geocode failed for %r: %s", city, e)
         return ""
@@ -1037,13 +1067,12 @@ class OpenStreetMap(DiscoveryProvider):
     blurb = ("Free public map data. No signup, no key, no card. Try the whole "
              "pipeline for nothing before you pay anyone.")
     cost_note = "free"
-    free_tier = "unlimited, within community rate etiquette"
+    free_tier = "public community service; modest interactive use only"
     signup_url = "https://www.openstreetmap.org"
     env_keys = ()
-    caveat = ("Coverage is thin for any trade without a storefront — OSM maps "
-              "premises, so it holds under 2,000 roofers for the entire US. "
-              "Great for a free trial run or as a cross-reference; not a "
-              "complete list.")
+    caveat = ("Coverage is incomplete, especially for trades without a "
+              "storefront. OSM is useful for an exploratory local search or "
+              "cross-reference, not a complete business list.")
 
     # Several public Overpass instances run the same API. The main one
     # throttles readily, so try the mirrors before giving up — a free source
@@ -1085,7 +1114,24 @@ class OpenStreetMap(DiscoveryProvider):
     # throttling, a gateway that lost its backend, an overloaded instance, a
     # timed-out one. Every one of them is another mirror's problem to solve, so
     # walk on. A 400 (bad query) or 404 is ours and fails here and now.
-    RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
+    RETRY_STATUSES = frozenset({406, 429, 500, 502, 503, 504})
+    RATE_LIMIT_STATUSES = frozenset({406, 429})
+    RATE_LIMIT_BACKOFF = 30.0
+    _request_lock = asyncio.Lock()
+    _next_request_at = 0.0
+
+    @classmethod
+    def endpoints(cls) -> tuple[str, ...]:
+        """Resolve HTTPS Overpass endpoints from operator configuration."""
+        configured = os.environ.get("SELLBIRD_OVERPASS_URLS", "").strip()
+        values = configured.split(",") if configured else list(cls.ENDPOINTS)
+        endpoints = tuple(dict.fromkeys(
+            _configured_https_url(value, label="SELLBIRD_OVERPASS_URLS")
+            for value in values if value.strip()
+        ))
+        if not endpoints or len(endpoints) > 5:
+            raise ValueError("SELLBIRD_OVERPASS_URLS must contain between 1 and 5 HTTPS endpoints")
+        return endpoints
 
     # A friendly term maps to the OSM tags that actually carry those businesses.
     TAG_MAP = {
@@ -1093,11 +1139,17 @@ class OpenStreetMap(DiscoveryProvider):
         "plumb": ['craft=plumber'],
         "hvac": ['craft=hvac'],
         "electric": ['craft=electrician'],
+        "accountant": ['office=accountant'],
+        "accounting": ['office=accountant'],
         "dentist": ['amenity=dentist'],
         "lawyer": ['office=lawyer'],
         "attorney": ['office=lawyer'],
         "contractor": ['craft=builder', 'office=construction_company'],
         "landscap": ['craft=gardener', 'shop=garden_centre'],
+        "pharmacy": ['amenity=pharmacy'],
+        "supermarket": ['shop=supermarket'],
+        "bakery": ['shop=bakery'],
+        "hardware store": ['shop=hardware'],
         # Spanish terms
         "ferreter": ['shop=hardware', 'shop=doityourself'],
         "supermercado": ['shop=supermarket'],
@@ -1160,28 +1212,43 @@ class OpenStreetMap(DiscoveryProvider):
         # businesses in it.
         headers = {"User-Agent": "Sellbird/0.1 (open-source sales agent; "
                                  "github.com/ethanplusai/sellbird)"}
+        endpoints = self.endpoints()
         r = None
-        for i, endpoint in enumerate(self.ENDPOINTS):
-            if i:
-                await asyncio.sleep(self.BACKOFF)
-            try:
-                r = await client.post(endpoint, content=body.encode(),
-                                      headers=headers,
-                                      timeout=self.HTTP_TIMEOUT)
-            except httpx.HTTPError as e:
-                logger.warning("osm: %s unreachable (%s)", endpoint, e)
-                continue
-            if r.status_code not in self.RETRY_STATUSES:
-                break
-            logger.warning("osm: %s is throttling or down (%s) — trying the "
-                           "next mirror", endpoint, r.status_code)
-        else:
+        async with self._request_lock:
+            for i, endpoint in enumerate(endpoints):
+                if i:
+                    delay = max(self.BACKOFF,
+                                self._next_request_at - time.monotonic())
+                    if delay > 0:
+                        await asyncio.sleep(delay)
+                else:
+                    delay = self._next_request_at - time.monotonic()
+                    if delay > 0:
+                        await asyncio.sleep(delay)
+                try:
+                    r = await client.post(endpoint, content=body.encode(),
+                                          headers=headers,
+                                          timeout=self.HTTP_TIMEOUT)
+                except httpx.HTTPError as e:
+                    logger.warning("osm: %s unreachable (%s)", endpoint, e)
+                    r = None
+                    continue
+                if r.status_code not in self.RETRY_STATUSES:
+                    break
+                logger.warning("osm: %s is throttling or down (%s) — trying the "
+                               "next mirror", endpoint, r.status_code)
+                if r.status_code in self.RATE_LIMIT_STATUSES:
+                    self.__class__._next_request_at = max(
+                        self.__class__._next_request_at,
+                        time.monotonic() + self.RATE_LIMIT_BACKOFF,
+                    )
+            else:
+                r = None
+        if r is None:
             raise RuntimeError(
                 "Every public Overpass mirror is unavailable or throttling "
                 "right now. This is free volunteer infrastructure — wait a few "
-                "minutes and re-run, or use a paid provider for bulk work.")
-        if r is None:
-            raise RuntimeError("Could not reach any Overpass mirror.")
+                "minutes and re-run the interactive search later.")
         r.raise_for_status()
 
         out = []
@@ -1460,16 +1527,10 @@ class ScavioSearch(ScavioProvider):
 
 
 PROVIDERS: dict[str, DiscoveryProvider] = {
-    p.key: p for p in (
-        OpenStreetMap(),
-        TinyFish(),
-        DataForSEOListings(),
-        DataForSEOSerp(),
-        DataForSEOMaps(),
-        Serper(),
-        ScavioMaps(),
-        ScavioSearch(),
-    )
+    # The local sales-agent build exposes only free public OpenStreetMap
+    # discovery. Paid SERP/listing/enrichment integrations remain outside the
+    # executable discovery registry.
+    "osm": OpenStreetMap(),
 }
 
 DEFAULT_PROVIDER = "osm"
@@ -1642,6 +1703,9 @@ def preset_problem(preset: str, provider_key: str, config=None) -> str | None:
     provider = PROVIDERS.get(provider_key)
     if provider is None or provider.kind not in spec["kinds"]:
         names = ", ".join(k for k, p in PROVIDERS.items() if p.kind in spec["kinds"])
+        if not names:
+            return (f"The {spec['label']} preset requires a web search provider, but no compatible "
+                    "provider is enabled in this local build.")
         return (f"The {spec['label']} preset is a web search, so it needs a search "
                 f"provider ({names}), not {provider_key}.")
     if any("{role}" in tpl for tpl in preset_templates(spec)) and config is not None:

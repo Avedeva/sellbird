@@ -294,7 +294,7 @@ async def heartbeat(stop_event: asyncio.Event | None = None):
     logger.info(
         f"Thinking with {brain.provider_label}"
         + (f" ({brain.model})" if brain.model else "")
-        + ". Change brain.provider in sellbird.yaml to switch."
+        + ". Inference is local; configure SELLBIRD_OLLAMA_URL only for private hardware."
     )
     for notice in (sending_notice(config), compliance_notice(config)):
         if notice:

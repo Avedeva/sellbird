@@ -20,6 +20,7 @@ import aiosqlite
 import yaml
 from dotenv import load_dotenv
 from fastapi import APIRouter, FastAPI, Request
+from fastapi.openapi.utils import get_openapi
 from fastapi.responses import (
     HTMLResponse, JSONResponse, PlainTextResponse, Response,
 )
@@ -58,6 +59,33 @@ def _resolve_config_file() -> Path:
 # No /docs, /redoc or /openapi.json: the API is for this UI only, and every
 # route except the static shell needs the token (see dashboard_auth).
 app = FastAPI(title="Sellbird Dashboard", docs_url=None, redoc_url=None, openapi_url=None)
+
+
+def _authenticated_openapi():
+    """Expose the API contract as OpenAPI while keeping the dashboard UI off /docs."""
+    if app.openapi_schema is None:
+        schema = get_openapi(title=app.title, version="0.4.0", routes=app.routes)
+        schema.setdefault("components", {}).setdefault("securitySchemes", {})["DashboardBearer"] = {
+            "type": "http", "scheme": "bearer", "bearerFormat": "Sellbird dashboard or agent token",
+        }
+        for path, operations in schema.get("paths", {}).items():
+            if path.startswith("/api/") and path != "/api/instance":
+                for operation in operations.values():
+                    if isinstance(operation, dict):
+                        operation["security"] = [{"DashboardBearer": []}]
+        app.openapi_schema = schema
+    return app.openapi_schema
+
+
+app.openapi = _authenticated_openapi
+
+
+@app.get("/api/openapi.json", include_in_schema=False)
+async def authenticated_openapi_spec():
+    """Return the generated API contract; DashboardGuard requires a bearer token."""
+    return app.openapi()
+
+
 token_store = auth.TokenStore(TOKEN_FILE)
 agent_token_store = auth.TokenStore(AGENT_TOKEN_FILE)
 # Innermost first: the guard (added next) sets the principal before this runs.
@@ -2905,6 +2933,12 @@ async def dashboard():
     return (WEB_DIR / "index.html").read_text(encoding="utf-8")
 
 
+@app.get("/sales-agent", response_class=HTMLResponse)
+async def sales_agent_dashboard():
+    """The product-scoped local AI sales-agent experience."""
+    return (WEB_DIR / "sales.html").read_text(encoding="utf-8")
+
+
 class DashboardSetupError(Exception):
     """The dashboard can't start safely; the message says what to do."""
 
@@ -2950,6 +2984,10 @@ async def get_instance():
 from sellbird.inbox_routes import router as _inbox_router  # noqa: E402
 
 app.include_router(_inbox_router)
+
+from sellbird.sales_routes import router as _sales_router  # noqa: E402
+
+app.include_router(_sales_router)
 
 
 # ── Extensions (sellbird.extensions): their routes, after every built-in one,
